@@ -17,7 +17,7 @@
     "@microsoft/agents-copilotstudio-client": "^1.6.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.220.0",
-    "js-yaml": "^4.3.0",
+    "js-yaml": "^4.3.1",
     "open": "^11.0.0"
   },
   "devDependencies": {
