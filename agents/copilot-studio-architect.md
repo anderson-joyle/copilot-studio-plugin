@@ -154,31 +154,21 @@ Keep existing model, recognizer, authentication, channels, language, template, `
 
 ## Knowledge YAML
 
-Create knowledge only when the source has a concrete searchable source or local uploaded file.
+Create knowledge only when the source has a concrete searchable source or a local uploaded file.
+Knowledge components live in `capabilities\knowledge\` (source-backed sources) and
+`capabilities\knowledge\files\` (uploaded files).
 
-For SharePoint or source-backed knowledge, create `capabilities\knowledge\<schemaName>.<FriendlyName>_<id>.mcs.yml`:
+The **authoritative knowledge-source schema** — every source kind (public website, SharePoint,
+OneDrive, uploaded file), the exact YAML shapes and fields, `targetKind` rules, filename conventions,
+and SharePoint/OneDrive URL normalization — lives in a single shared reference,
+`reference/knowledge-schema.md`. Read it and follow it exactly; the `/add-knowledge` command uses the
+same file, so the two never drift. Resolve its path via the plugin root: read
+`path.join(os.homedir(), '.copilot-studio-cli', 'plugin-paths.json')` to get `pluginRoot` for the
+current `mcs-assistant` plugin, then read `path.join(pluginRoot, 'reference', 'knowledge-schema.md')`.
 
-```yaml
-mcs.metadata:
-  componentName: Travel-Italy
-  description: This knowledge source provides information found in Travel-Italy SharePoint.
-kind: KnowledgeSourceConfiguration
-source:
-  kind: SharePointKnowledgeSource
-  siteUrl: https://<tenant>.sharepoint.com/sites/<Site>/Shared%20Documents/Travel-Italy
-  additionalSearchTerms:
-  targetKind: Folder
-```
-
-For uploaded file knowledge, copy the actual available file into `capabilities\knowledge\files\` and create a sidecar named `<filename>.<ext>.mcs.yml` next to it:
-
-```yaml
-mcs.metadata:
-  componentName: hr-policies-france.pdf
-  description: This knowledge source contains information related to HR policies applicable in France.
-```
-
-Do not create file-knowledge sidecars for missing binary files. If the source report only says that knowledge exists but gives no usable URL or file, capture the intended grounding behavior in instructions or skills and list the missing source as an unresolved gap.
+Do not create file-knowledge sidecars for missing binary files. If the source report only says that
+knowledge exists but gives no usable URL or file, capture the intended grounding behavior in
+instructions or skills and list the missing source as an unresolved gap.
 
 ## Tool YAML
 
