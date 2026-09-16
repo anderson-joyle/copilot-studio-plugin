@@ -102,9 +102,14 @@ node "<pluginRoot>/scripts/verify-knowledge-access.bundle.js" --agent-dir "<agen
   **without** authenticating — useful to check setup first.
 - It reuses the same per-agent Entra **public-client app id** the `/chat` skill saves. That app
   registration must **also** have the delegated Microsoft Graph permissions **`Files.Read.All`** and
-  **`Sites.Read.All`** consented. If `needsClientId` is true or auth/permission errors come back,
-  tell the user this is an **optional** step, explain the missing setup, and **continue** adding the
-  source anyway.
+  **`Sites.Read.All`** consented, and must be an app the user **owns** in the tenant. If
+  `needsClientId` is true or auth/permission errors come back, tell the user this is an **optional**
+  step, explain the missing setup, and **continue** adding the source anyway.
+- **`AADSTS65002` in an `error`** means the `--client-id` is a Microsoft **first-party/sample** app,
+  which cannot obtain Graph tokens. Tell the user to supply **their own** Entra app registration
+  (single-tenant, public client flows enabled, delegated Graph `Files.Read.All` + `Sites.Read.All`
+  consented). An app id that works for `/chat` (preauthorized for the Power Platform API) is **not**
+  automatically valid for Graph. This is a setup issue, not a failure of the source — continue.
 
 **Interpreting the JSON `status`:**
 

@@ -21,6 +21,12 @@
  * registration must additionally have the delegated Microsoft Graph permissions
  * Files.Read.All and Sites.Read.All (admin- or user-consented) for the Graph call to succeed.
  *
+ * IMPORTANT: --client-id must be an app registration YOU own in the agent's tenant. A Microsoft
+ * first-party (Microsoft-owned) or sample app id will fail with AADSTS65002 — first-party apps can
+ * only get Microsoft Graph tokens if Graph's owner preauthorized them, which a tenant admin cannot
+ * grant. An app id that is preauthorized for the Copilot Studio / Power Platform API (so the /chat
+ * skill works) is NOT automatically authorized for Microsoft Graph; use your own app for this check.
+ *
  * Usage:
  *   node verify-knowledge-access.bundle.js --agent-dir <path> "<sharepoint-or-onedrive-url>"
  *   node verify-knowledge-access.bundle.js --agent-dir <path> --url <url> --client-id <appId>
@@ -262,6 +268,73 @@ function parseArgs() {
 // Authentication (MSAL device-code, Graph scopes)
 // ---------------------------------------------------------------------------
 
+function firstLine(s) {
+  return String(s || "").split(/\r?\n/)[0].trim();
+}
+
+// Map well-known Entra (AADSTS) failure codes found in an error/description string to an actionable
+// hint. The most important here is AADSTS65002: it means --client-id is a Microsoft first-party app
+// that cannot obtain Graph tokens, so the user must supply their own app registration instead.
+function authErrorHint(text) {
+  const s = String(text || "");
+  if (/AADSTS65002\b/.test(s)) {
+    return (
+      "That --client-id is a Microsoft first-party (Microsoft-owned) application, which cannot " +
+      "obtain Microsoft Graph tokens: first-party apps require preauthorization by the API owner " +
+      "that a tenant admin cannot grant. Use YOUR OWN Entra app registration instead — create a " +
+      "single-tenant app, enable 'Allow public client flows', add the delegated Graph permissions " +
+      "Files.Read.All and Sites.Read.All, grant consent, then re-run with --client-id <your-app-id>. " +
+      "Note: an app id preauthorized for the Copilot Studio / Power Platform API (used by the /chat " +
+      "skill) is NOT automatically authorized for Microsoft Graph."
+    );
+  }
+  if (/AADSTS700016\b/.test(s) || /unauthorized_client/.test(s)) {
+    return (
+      "The app registration (--client-id) must exist in this agent's tenant and allow public " +
+      "client (device code) flows. Create or consent the app in the correct tenant, or pass a " +
+      "different --client-id."
+    );
+  }
+  if (/AADSTS7000218\b/.test(s) || /invalid_client/.test(s)) {
+    return "Enable 'Allow public client flows' on the app registration.";
+  }
+  if (/AADSTS65001\b/.test(s) || /consent_required/.test(s) || /interaction_required/.test(s)) {
+    return (
+      "Consent has not been granted — add and consent the delegated Microsoft Graph permissions " +
+      "Files.Read.All and Sites.Read.All on the app registration, then retry."
+    );
+  }
+  return "";
+}
+
+// MSAL-node can mask a failed /devicecode request (app registration missing in the tenant, public
+// client flows disabled, or an unauthorized client/scope) as an opaque
+// "post_request_failed: invalid_grant" and invoke the device-code callback with an empty response,
+// so the user never sees the real reason. When that happens we ask the token endpoint directly to
+// surface the actual AADSTS error.
+async function diagnoseDeviceCodeFailure({ authority, clientId, scopes }) {
+  try {
+    const scope = Array.isArray(scopes) ? scopes.join(" ") : String(scopes || "");
+    const body = new URLSearchParams({ client_id: clientId, scope }).toString();
+    const res = await fetch(`${authority}/oauth2/v2.0/devicecode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    const data = await res.json().catch(() => null);
+    if (data && data.error) {
+      const desc = firstLine(data.error_description);
+      const hint = authErrorHint(desc) || authErrorHint(data.error);
+      return `Device-code sign-in could not start: ${data.error}${desc ? ` — ${desc}` : ""}.${
+        hint ? " " + hint : ""
+      }`;
+    }
+  } catch {
+    // best effort; fall back to the generic error
+  }
+  return null;
+}
+
 async function getGraphToken({ tenantId, clientId, scopes, accountName, fallbackCachePath }) {
   const authority = `https://login.microsoftonline.com/${tenantId}`;
   const cachePlugin = await createCachePluginWithFallback(accountName, fallbackCachePath, log);
@@ -281,13 +354,36 @@ async function getGraphToken({ tenantId, clientId, scopes, accountName, fallback
     }
   }
 
-  const result = await app.acquireTokenByDeviceCode({
-    scopes,
-    deviceCodeCallback: (response) => {
-      if (response && response.message) log(response.message);
-    },
-  });
-  return result.accessToken;
+  let sawPrompt = false;
+  try {
+    const result = await app.acquireTokenByDeviceCode({
+      scopes,
+      deviceCodeCallback: (response) => {
+        if (response && response.message) {
+          sawPrompt = true;
+          log(response.message);
+        }
+      },
+    });
+    return result.accessToken;
+  } catch (e) {
+    // If we never received a real device-code prompt, the /devicecode call itself failed; surface
+    // the underlying AADSTS error instead of MSAL's misleading post_request_failed/invalid_grant.
+    if (!sawPrompt) {
+      const detail = await diagnoseDeviceCodeFailure({ authority, clientId, scopes });
+      if (detail) die(detail, { tenantId });
+    }
+    const code = e && (e.errorCode || e.name);
+    const msg = e && (e.errorMessage || e.message);
+    const hint = authErrorHint(msg) || authErrorHint(String(code));
+    die(
+      `Authentication failed${code ? `: ${code}` : ""}${msg ? ` (${firstLine(msg)})` : ""}. ` +
+        (hint ||
+          "The app registration must allow public-client (device code) flows and have the " +
+            "delegated Microsoft Graph permissions Files.Read.All and Sites.Read.All consented."),
+      { tenantId }
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,34 +484,24 @@ async function main() {
   }
   if (!clientId) {
     die(
-      "No app registration configured. Provide --client-id <appId> (an Entra public-client app " +
-        "with the delegated Microsoft Graph permissions Files.Read.All and Sites.Read.All). If you " +
-        "already set up the chat skill's app id for this agent, add those Graph permissions to that " +
-        "same app registration.",
+      "No app registration configured. Provide --client-id <appId> — an Entra public-client app " +
+        "that YOU own in this tenant, with the delegated Microsoft Graph permissions Files.Read.All " +
+        "and Sites.Read.All consented. Do NOT use a Microsoft first-party/sample app id (it will " +
+        "fail with AADSTS65002). If you already set up the chat skill's app id for this agent and " +
+        "it is your own registration, add those Graph permissions to that same app.",
       { needsClientId: true, tenantId, agentId }
     );
   }
 
   log(`Cloud: ${cloud} (Graph: ${graphHost})`);
   log("Authenticating (device code)...");
-  let token;
-  try {
-    token = await getGraphToken({
-      tenantId,
-      clientId,
-      scopes,
-      accountName: cacheAccountName(agentId),
-      fallbackCachePath: tokenCachePath(agentId),
-    });
-  } catch (e) {
-    const code = e && (e.errorCode || e.name);
-    const msg = e && (e.errorMessage || e.message);
-    die(
-      `Authentication failed${code ? `: ${code}` : ""}${msg ? ` (${msg})` : ""}. The app ` +
-        `registration must allow public-client (device code) flows and have the delegated Graph ` +
-        `permissions Files.Read.All and Sites.Read.All consented.`
-    );
-  }
+  const token = await getGraphToken({
+    tenantId,
+    clientId,
+    scopes,
+    accountName: cacheAccountName(agentId),
+    fallbackCachePath: tokenCachePath(agentId),
+  });
 
   log("Checking access via Microsoft Graph...");
   let res, url;

@@ -175,8 +175,11 @@ command exposes this as an **opt-in** step backed by `scripts/verify-knowledge-a
   item. Always pair it with the runtime-permissions note above.
 - **Setup:** it reuses the per-agent Entra public-client app id saved by the `/chat` skill; that app
   registration must additionally have the delegated Graph permissions **`Files.Read.All`** and
-  **`Sites.Read.All`** consented. It is best-effort — if it isn't configured, skip it and add the
-  source anyway.
+  **`Sites.Read.All`** consented. The `--client-id` must be an app **you own** in the tenant — a
+  Microsoft **first-party/sample** app id fails with **`AADSTS65002`** (first-party apps can't get
+  Graph tokens, and an id preauthorized for the Copilot Studio / Power Platform API is *not*
+  authorized for Graph). It is best-effort — if it isn't configured, skip it and add the source
+  anyway.
 
 ## Limitations
 
