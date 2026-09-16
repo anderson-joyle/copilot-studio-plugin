@@ -1,7 +1,7 @@
 ---
 description: Add a knowledge source (public website, SharePoint, OneDrive, or a locally uploaded file) to a locally-cloned Copilot Studio agentic-loop agent by writing the modern capabilities/knowledge YAML.
 argument-hint: A URL (website / SharePoint / OneDrive) or a local file path, plus an optional name/description
-allowed-tools: Read, Write, Glob, Grep, Bash(cp *), Bash(Copy-Item *)
+allowed-tools: Read, Write, Glob, Grep, Bash(cp *), Bash(Copy-Item *), Bash(node *verify-knowledge-access.bundle.js*)
 ---
 
 # Add a Knowledge Source
@@ -61,9 +61,12 @@ Extract from `$ARGUMENTS`:
    - a local file path that exists → **Uploaded file** (copy into `files/` + metadata-only sidecar)
 2. **Normalize** SharePoint/OneDrive URLs (direct path, `AllItems.aspx?id=` decode, sharing-link
    refusal, `%20` encoding) exactly as the reference specifies.
-3. **Generate** the YAML for the matching source kind using the reference's shapes and metadata
+3. **(Optional) Verify access** — for **SharePoint/OneDrive** sources only, you may pre-check that
+   the link is valid and the signed-in user can read it, before writing YAML (see "Optional access
+   pre-check" below). This is opt-in and best-effort: skip it silently if it isn't configured.
+4. **Generate** the YAML for the matching source kind using the reference's shapes and metadata
    rules (`componentName`, plus a genuinely descriptive `description`).
-4. **Save** using the reference's filename convention:
+5. **Save** using the reference's filename convention:
    - source-backed → `capabilities/knowledge/<schemaName>.<slug>_<id>.mcs.yml`
    - uploaded file → copy the file into `capabilities/knowledge/files/`, then write the
      metadata-only sidecar `capabilities/knowledge/files/<slug>_<id>.mcs.yml`
@@ -74,3 +77,41 @@ Tell the user what was created: the source kind, the resolved `siteUrl` (or copi
 path of the written `*.mcs.yml`. Remind them the agent must be re-packed/pushed and (re)published for
 the new knowledge to take effect. For source types not supported here (Dataverse, AI Search, SQL
 Server, Graph connectors), point them to the Limitations section of the reference.
+
+## Optional access pre-check (SharePoint / OneDrive)
+
+For SharePoint/OneDrive links you can verify **up front** that the link resolves and the **signed-in
+(author) user** can read it — without downloading the file — via a single Microsoft Graph call
+(`GET /shares/{id}/driveItem`). This is **opt-in** (offer it, or run it when the user asks); never
+block adding the source on it.
+
+**⚠️ Delegated-permissions caveat — always state this.** SharePoint/OneDrive knowledge is retrieved
+at runtime using **each end user's** permissions. This check runs as the author, so a ✅ result
+confirms **your** access only — it does **not** guarantee end users of the agent can access the item.
+Always pair the result with a reminder to ensure end users have access in SharePoint/OneDrive.
+
+**How to run it.** Resolve `pluginRoot` from
+`path.join(os.homedir(), '.copilot-studio-cli', 'plugin-paths.json')` (as in step "Authoritative
+schema" above), then:
+
+```bash
+node "<pluginRoot>/scripts/verify-knowledge-access.bundle.js" --agent-dir "<agentDir>" "<url>"
+```
+
+- Add `--dry-run` to resolve the plan (encoded share id, Graph endpoint, scopes, `needsClientId`)
+  **without** authenticating — useful to check setup first.
+- It reuses the same per-agent Entra **public-client app id** the `/chat` skill saves. That app
+  registration must **also** have the delegated Microsoft Graph permissions **`Files.Read.All`** and
+  **`Sites.Read.All`** consented. If `needsClientId` is true or auth/permission errors come back,
+  tell the user this is an **optional** step, explain the missing setup, and **continue** adding the
+  source anyway.
+
+**Interpreting the JSON `status`:**
+
+| `status` | Meaning | What to tell the user |
+|---|---|---|
+| `accessible` | Link valid; author can read it | ✅ proceed — plus the end-user caveat above |
+| `forbidden` | Item exists; author has no access | ⚠️ you can still add it, but confirm you (and end users) have access, or it will return nothing |
+| `notfound` | Link didn't resolve | ❌ likely a wrong/renamed URL — re-copy it from the browser address bar |
+| `skipped` | Not a SharePoint/OneDrive URL | no check needed |
+| `error` | Setup/auth/network problem | note it's optional; continue adding the source |

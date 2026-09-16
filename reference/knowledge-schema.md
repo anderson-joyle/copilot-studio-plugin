@@ -162,6 +162,22 @@ Copilot Studio needs a direct path — not a browser UI URL. Normalize before wr
 - **Test after adding.** Ask the agent a representative question and verify it retrieves and cites the
   new source.
 
+## Optional: verifying a SharePoint/OneDrive link before adding
+
+You can pre-check that a SharePoint/OneDrive link is valid and readable **without downloading the
+file**, using a single Microsoft Graph call (`GET /shares/{id}/driveItem`). The `/add-knowledge`
+command exposes this as an **opt-in** step backed by `scripts/verify-knowledge-access.bundle.js`.
+
+- **What it proves:** the item exists (`200`), the author has no access (`403`), or the link doesn't
+  resolve (`404`).
+- **⚠️ It checks the author only.** Because knowledge is retrieved at runtime with **each end user's**
+  delegated permissions, a positive result confirms *your* access — not that end users can read the
+  item. Always pair it with the runtime-permissions note above.
+- **Setup:** it reuses the per-agent Entra public-client app id saved by the `/chat` skill; that app
+  registration must additionally have the delegated Graph permissions **`Files.Read.All`** and
+  **`Sites.Read.All`** consented. It is best-effort — if it isn't configured, skip it and add the
+  source anyway.
+
 ## Limitations
 
 Public Website, SharePoint, OneDrive, and uploaded files can be authored directly in YAML. Other
