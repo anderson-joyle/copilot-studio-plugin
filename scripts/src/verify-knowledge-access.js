@@ -9,7 +9,7 @@
  * It does this with a single Microsoft Graph call:
  *     GET https://graph.microsoft.com/v1.0/shares/{shareId}/driveItem
  * where {shareId} is the "u!"-encoded item URL. A 200 means valid + accessible; 403 means the
- * item exists but the user has no access; 404 means the link is invalid / not found.
+ * user has no access or the link cannot be resolved; 404 means the link is invalid / not found.
  *
  * IMPORTANT (delegated permissions): SharePoint/OneDrive knowledge is retrieved at runtime using
  * *each end user's* permissions. This check runs as the author, so a positive result confirms the
@@ -19,7 +19,7 @@
  * Auth mirrors chat-with-agent: MSAL device-code against a public-client Entra app
  * (--client-id), reusing the per-agent app id saved in <pluginData>/chat-config.json. The app
  * registration must additionally have the delegated Microsoft Graph permissions
- * Files.Read.All and Sites.Read.All (admin- or user-consented) for the Graph call to succeed.
+ * Files.ReadWrite consented for the Graph call to succeed.
  *
  * IMPORTANT: --client-id must be an app registration YOU own in the agent's tenant. A Microsoft
  * first-party (Microsoft-owned) or sample app id will fail with AADSTS65002 — first-party apps can
@@ -35,7 +35,7 @@
  *
  * Output (stdout): a single distilled JSON object:
  *   { status, url, checkedAs, item?, httpStatus?, note, ... }
- *   status ∈ "accessible" | "forbidden" | "notfound" | "skipped" | "error".
+ *   status ∈ "ok" | "accessible" | "forbidden" | "notfound" | "skipped" | "error".
  * Diagnostics (stderr): human-readable progress + the device-code prompt.
  * Exit codes: 0 = a definitive determination was made (including forbidden/notfound/skipped),
  *             1 = an operational error (bad input, auth failure, network).
@@ -45,7 +45,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { PublicClientApplication } = require("@azure/msal-node");
-const { createCachePluginWithFallback } = require("./msal-cache");
+const { createSecureCachePlugin } = require("./secure-msal-cache");
 
 // ---------------------------------------------------------------------------
 // Output helpers
@@ -83,28 +83,58 @@ const GRAPH_HOST = {
   Mooncake: "microsoftgraph.chinacloudapi.cn",
 };
 
+const AUTHORITY_HOST = {
+  Prod: "login.microsoftonline.com",
+  FirstRelease: "login.microsoftonline.com",
+  Test: "login.microsoftonline.com",
+  Preprod: "login.microsoftonline.com",
+  Dev: "login.microsoftonline.com",
+  Exp: "login.microsoftonline.com",
+  Prv: "login.microsoftonline.com",
+  Gov: "login.microsoftonline.us",
+  GovFR: "login.microsoftonline.us",
+  High: "login.microsoftonline.us",
+  DoD: "login.microsoftonline.us",
+  Mooncake: "login.partner.microsoftonline.cn",
+};
+
 function normalizeCloud(value) {
   if (!value) return "Prod";
   const found = Object.keys(GRAPH_HOST).find(
     (k) => k.toLowerCase() === String(value).toLowerCase()
   );
-  return found || "Prod";
+  return found || null;
 }
 
 function graphHostForCloud(cloud) {
-  return GRAPH_HOST[cloud] || GRAPH_HOST.Prod;
+  return GRAPH_HOST[cloud] || null;
 }
 
-// Best-effort cloud inference from conn.json endpoints (default Prod). Mirrors chat-with-agent:
-// only Test/Preprod/Dev are auto-detected; national clouds (Gov/DoD/China) are not inferred from
-// these hosts (the patterns are ambiguous, e.g. "us-il107" in a commercial gateway host) and must
-// be selected explicitly with --cloud.
+function authorityHostForCloud(cloud) {
+  return AUTHORITY_HOST[cloud] || null;
+}
+
+// Best-effort cloud inference from conn.json endpoints (default Prod). Mirrors chat-with-agent for
+// Test/Preprod/Dev. National clouds are inferred separately from the SharePoint URL because gateway
+// host patterns can be ambiguous (for example, "us-il107" can appear in a commercial host).
 function inferCloudFromConn(conn) {
   const host = `${conn.AgentManagementEndpoint || ""} ${conn.DataverseEndpoint || ""}`.toLowerCase();
   if (/preprod/.test(host)) return "Preprod";
   if (/\b(test)\b|\.test\./.test(host)) return "Test";
   if (/\bdev\b|\.dev\./.test(host)) return "Dev";
   return "Prod";
+}
+
+function inferCloudFromUrl(rawUrl) {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    if (host.endsWith(".sharepoint-mil.us")) return "DoD";
+    if (host.endsWith(".sharepoint.us")) return "High";
+    if (host.endsWith(".sharepoint.cn")) return "Mooncake";
+  } catch {
+    // URL validation happens separately.
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,17 +168,6 @@ function resolveClientId({ explicit, agentId, tenantId }) {
     // no saved config
   }
   return null;
-}
-
-function tokenCachePath(agentId) {
-  const dir = path.join(resolvePluginDataDir(), "token-cache");
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch {
-    // best effort
-  }
-  const safe = (agentId || "default").replace(/[^a-zA-Z0-9._-]/g, "_");
-  return path.join(dir, `${safe}.json`);
 }
 
 // Reuse the same per-agent encrypted cache slot as chat so a single sign-in serves both. The
@@ -193,12 +212,21 @@ function classifyUrl(rawUrl) {
     return { kind: "invalid", reason: "Not a valid URL." };
   }
   const host = u.hostname.toLowerCase();
-  const isSpo = /\.sharepoint\.(com|us|cn|de)$/.test(host) || host.endsWith(".sharepoint-mil.us");
+  const isSpo = /\.sharepoint\.(com|us|cn)$/.test(host) || host.endsWith(".sharepoint-mil.us");
   if (!isSpo) {
     return {
       kind: "other",
       reason:
         "Not a SharePoint/OneDrive URL — access pre-check only applies to SharePoint and OneDrive links.",
+    };
+  }
+  if (u.protocol !== "https:") {
+    return { kind: "invalid", reason: "SharePoint and OneDrive URLs must use HTTPS." };
+  }
+  if (u.username || u.password) {
+    return {
+      kind: "invalid",
+      reason: "SharePoint and OneDrive URLs must not contain embedded credentials.",
     };
   }
   // Opaque sharing links (/:f:/, /:w:/, /:x:/, /:b:/, ...) can still be resolved by Graph /shares,
@@ -216,6 +244,10 @@ function encodeShareId(url) {
   return "u!" + b64.replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
 }
 
+function defaultGraphScopes(graphHost) {
+  return [`https://${graphHost}/Files.ReadWrite`];
+}
+
 // ---------------------------------------------------------------------------
 // CLI parsing
 // ---------------------------------------------------------------------------
@@ -228,7 +260,6 @@ function parseArgs() {
     tenantId: null,
     clientId: null,
     cloud: null,
-    graphScope: null,
     dryRun: false,
   };
   for (let i = 0; i < args.length; i++) {
@@ -247,11 +278,6 @@ function parseArgs() {
         break;
       case "--cloud":
         parsed.cloud = args[++i];
-        break;
-      case "--graph-scope":
-        // repeatable
-        parsed.graphScope = parsed.graphScope || [];
-        parsed.graphScope.push(args[++i]);
         break;
       case "--dry-run":
         parsed.dryRun = true;
@@ -282,8 +308,8 @@ function authErrorHint(text) {
       "That --client-id is a Microsoft first-party (Microsoft-owned) application, which cannot " +
       "obtain Microsoft Graph tokens: first-party apps require preauthorization by the API owner " +
       "that a tenant admin cannot grant. Use YOUR OWN Entra app registration instead — create a " +
-      "single-tenant app, enable 'Allow public client flows', add the delegated Graph permissions " +
-      "Files.Read.All and Sites.Read.All, grant consent, then re-run with --client-id <your-app-id>. " +
+      "single-tenant app, enable 'Allow public client flows', add the delegated Graph permission " +
+      "Files.ReadWrite, grant consent, then re-run with --client-id <your-app-id>. " +
       "Note: an app id preauthorized for the Copilot Studio / Power Platform API (used by the /chat " +
       "skill) is NOT automatically authorized for Microsoft Graph."
     );
@@ -300,8 +326,8 @@ function authErrorHint(text) {
   }
   if (/AADSTS65001\b/.test(s) || /consent_required/.test(s) || /interaction_required/.test(s)) {
     return (
-      "Consent has not been granted — add and consent the delegated Microsoft Graph permissions " +
-      "Files.Read.All and Sites.Read.All on the app registration, then retry."
+      "Consent has not been granted — add and consent the delegated Microsoft Graph permission " +
+      "Files.ReadWrite on the app registration, then retry."
     );
   }
   return "";
@@ -335,13 +361,32 @@ async function diagnoseDeviceCodeFailure({ authority, clientId, scopes }) {
   return null;
 }
 
-async function getGraphToken({ tenantId, clientId, scopes, accountName, fallbackCachePath }) {
-  const authority = `https://login.microsoftonline.com/${tenantId}`;
-  const cachePlugin = await createCachePluginWithFallback(accountName, fallbackCachePath, log);
-  const app = new PublicClientApplication({
-    auth: { clientId, authority },
-    cache: { cachePlugin },
-  });
+async function resolveSecureCachePlugin(
+  accountName,
+  warn = log,
+  cacheFactory = createSecureCachePlugin
+) {
+  try {
+    return await cacheFactory(accountName);
+  } catch {
+    warn(
+      "Encrypted token storage is unavailable. Using an in-memory token cache for this run; " +
+        "no Microsoft Graph credentials will be written to disk."
+    );
+    return null;
+  }
+}
+
+function buildMsalConfig({ clientId, authority, cachePlugin }) {
+  const config = { auth: { clientId, authority } };
+  if (cachePlugin) config.cache = { cachePlugin };
+  return config;
+}
+
+async function getGraphToken({ tenantId, clientId, scopes, authorityHost, accountName }) {
+  const authority = `https://${authorityHost}/${tenantId}`;
+  const cachePlugin = await resolveSecureCachePlugin(accountName);
+  const app = new PublicClientApplication(buildMsalConfig({ clientId, authority, cachePlugin }));
 
   const accounts = await app.getTokenCache().getAllAccounts();
   if (accounts.length > 0) {
@@ -380,7 +425,7 @@ async function getGraphToken({ tenantId, clientId, scopes, accountName, fallback
       `Authentication failed${code ? `: ${code}` : ""}${msg ? ` (${firstLine(msg)})` : ""}. ` +
         (hint ||
           "The app registration must allow public-client (device code) flows and have the " +
-            "delegated Microsoft Graph permissions Files.Read.All and Sites.Read.All consented."),
+            "delegated Microsoft Graph permission Files.ReadWrite consented."),
       { tenantId }
     );
   }
@@ -435,7 +480,7 @@ async function main() {
   // Resolve tenant + agent (optional) for auth.
   let tenantId = args.tenantId;
   let agentId = null;
-  let cloud = args.cloud;
+  let cloud = args.cloud || inferCloudFromUrl(args.url);
   if (args.agentDir) {
     const info = loadConn(path.resolve(args.agentDir));
     tenantId = tenantId || info.tenantId;
@@ -443,12 +488,15 @@ async function main() {
     cloud = cloud || inferCloudFromConn(info.conn);
   }
   cloud = normalizeCloud(cloud);
+  if (!cloud) {
+    die(
+      `Unknown cloud '${args.cloud}'. Use Prod, FirstRelease, Test, Preprod, Dev, Exp, Prv, Gov, GovFR, High, DoD, or Mooncake.`
+    );
+  }
   const graphHost = graphHostForCloud(cloud);
+  const authorityHost = authorityHostForCloud(cloud);
   const shareId = encodeShareId(args.url);
-  const scopes =
-    args.graphScope && args.graphScope.length
-      ? args.graphScope
-      : [`https://${graphHost}/Files.Read.All`, `https://${graphHost}/Sites.Read.All`];
+  const scopes = defaultGraphScopes(graphHost);
 
   const clientId = resolveClientId({ explicit: args.clientId, agentId, tenantId });
 
@@ -465,6 +513,8 @@ async function main() {
       agentId: agentId || null,
       cloud,
       graphHost,
+      authorityHost,
+      authority: tenantId ? `https://${authorityHost}/${tenantId}` : null,
       shareId,
       graphEndpoint: `https://${graphHost}/v1.0/shares/${shareId}/driveItem`,
       scopes,
@@ -485,10 +535,10 @@ async function main() {
   if (!clientId) {
     die(
       "No app registration configured. Provide --client-id <appId> — an Entra public-client app " +
-        "that YOU own in this tenant, with the delegated Microsoft Graph permissions Files.Read.All " +
-        "and Sites.Read.All consented. Do NOT use a Microsoft first-party/sample app id (it will " +
+        "that YOU own in this tenant, with the delegated Microsoft Graph permission Files.ReadWrite " +
+        "consented. Do NOT use a Microsoft first-party/sample app id (it will " +
         "fail with AADSTS65002). If you already set up the chat skill's app id for this agent and " +
-        "it is your own registration, add those Graph permissions to that same app.",
+        "it is your own registration, add that Graph permission to the same app.",
       { needsClientId: true, tenantId, agentId }
     );
   }
@@ -499,8 +549,8 @@ async function main() {
     tenantId,
     clientId,
     scopes,
+    authorityHost,
     accountName: cacheAccountName(agentId),
-    fallbackCachePath: tokenCachePath(agentId),
   });
 
   log("Checking access via Microsoft Graph...");
@@ -570,7 +620,7 @@ async function main() {
   if (res.status === 401) {
     die(
       "Graph returned 401 Unauthorized — the token was rejected. Ensure the app registration has the " +
-        "delegated Graph permissions Files.Read.All and Sites.Read.All consented.",
+        "delegated Graph permission Files.ReadWrite consented.",
       { httpStatus: 401, endpoint: url }
     );
   }
@@ -586,4 +636,19 @@ async function main() {
   die(`Graph returned HTTP ${res.status}${snippet}`, { httpStatus: res.status, endpoint: url });
 }
 
-main().catch((e) => die(`Unexpected error: ${e.message}`));
+if (require.main === module) {
+  main().catch((e) => die(`Unexpected error: ${e.message}`));
+}
+
+module.exports = {
+  authorityHostForCloud,
+  buildMsalConfig,
+  classifyUrl,
+  defaultGraphScopes,
+  encodeShareId,
+  graphHostForCloud,
+  inferCloudFromConn,
+  inferCloudFromUrl,
+  normalizeCloud,
+  resolveSecureCachePlugin,
+};

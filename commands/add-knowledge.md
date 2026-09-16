@@ -1,7 +1,7 @@
 ---
 description: Add a knowledge source (public website, SharePoint, OneDrive, or a locally uploaded file) to a locally-cloned Copilot Studio agentic-loop agent by writing the modern capabilities/knowledge YAML.
 argument-hint: A URL (website / SharePoint / OneDrive) or a local file path, plus an optional name/description
-allowed-tools: Read, Write, Glob, Grep, Bash(cp *), Bash(Copy-Item *), Bash(node *verify-knowledge-access.bundle.js*)
+allowed-tools: Read, Write, Glob, Grep, Bash(mkdir *), Bash(cp *), Bash(powershell *Copy-Item*), Bash(node *verify-knowledge-access.bundle.js*)
 ---
 
 # Add a Knowledge Source
@@ -55,21 +55,40 @@ Extract from `$ARGUMENTS`:
 ### 3. Classify, build, and save (per `reference/knowledge-schema.md`)
 
 1. **Classify** the input into one of the four source kinds:
-   - `-my.sharepoint.com/personal/…` → **OneDrive** (`SharePointKnowledgeSource`, `targetKind: File`)
-   - other `*.sharepoint.com` → **SharePoint** (`targetKind: File` for a file, `Folder` for a folder/library)
-   - other `http(s)://` URL → **Public Website** (`WebsiteKnowledgeSource`)
-   - a local file path that exists → **Uploaded file** (copy into `files/` + metadata-only sidecar)
+   - Require every URL source to be absolute HTTPS with no embedded username or password.
+   - a `-my.sharepoint.*` host with `/personal/…` → **OneDrive**
+     (`SharePointKnowledgeSource`, `targetKind: File`)
+   - `*.sharepoint.com`, `*.sharepoint.us`, `*.sharepoint.cn`, or
+     `*.sharepoint-mil.us` → **SharePoint** (`targetKind: File` for a file, `Folder` for a
+     folder/library)
+   - other absolute `https://` URL → **Public Website** (`WebsiteKnowledgeSource`), after applying
+     the reference's public-site validation. Reject paths deeper than two nonempty segments and ask
+     for a broader HTTPS base URL instead.
+   - an existing, supported regular local file → **Uploaded file** (copy into `files/` +
+     metadata-only sidecar). Do not treat directories or unsupported file types as uploads.
 2. **Normalize** SharePoint/OneDrive URLs (direct path, `AllItems.aspx?id=` decode, sharing-link
    refusal, `%20` encoding) exactly as the reference specifies.
 3. **(Optional) Verify access** — for **SharePoint/OneDrive** sources only, you may pre-check that
    the link is valid and the signed-in user can read it, before writing YAML (see "Optional access
    pre-check" below). This is opt-in and best-effort: skip it silently if it isn't configured.
 4. **Generate** the YAML for the matching source kind using the reference's shapes and metadata
-   rules (`componentName`, plus a genuinely descriptive `description`).
+   rules (`componentName`, plus a genuinely descriptive `description`). Encode every value derived
+   from user input, a URL, a path, or an existing file as a YAML-safe double-quoted scalar using
+   `JSON.stringify(value)` semantics; never interpolate an external value as raw YAML structure.
 5. **Save** using the reference's filename convention:
    - source-backed → `capabilities/knowledge/<schemaName>.<slug>_<id>.mcs.yml`
    - uploaded file → copy the file into `capabilities/knowledge/files/`, then write the
      metadata-only sidecar `capabilities/knowledge/files/<slug>_<id>.mcs.yml`
+   Apply the reference's exact 100-character schema-name budget before writing. Check that the
+   resulting component path does not already exist; regenerate the id on a component-name collision.
+6. **Protect existing uploaded files.** Before copying, inspect the destination payload and all
+   sidecars whose `mcs.metadata.componentName` names that payload:
+   - If neither exists, copy the payload and create one sidecar.
+   - If the payload or a matching sidecar exists, do **not** overwrite anything. Ask whether to
+     replace the existing source or copy under a different payload name.
+   - On explicit replacement, reuse the existing sidecar filename/suffix and update that sidecar;
+     do not create a second sidecar. If zero or multiple matching sidecars make replacement
+     ambiguous, stop and report the conflict.
 
 ### 4. Confirm
 
@@ -101,20 +120,28 @@ node "<pluginRoot>/scripts/verify-knowledge-access.bundle.js" --agent-dir "<agen
 - Add `--dry-run` to resolve the plan (encoded share id, Graph endpoint, scopes, `needsClientId`)
   **without** authenticating — useful to check setup first.
 - It reuses the same per-agent Entra **public-client app id** the `/chat` skill saves. That app
-  registration must **also** have the delegated Microsoft Graph permissions **`Files.Read.All`** and
-  **`Sites.Read.All`** consented, and must be an app the user **owns** in the tenant. If
-  `needsClientId` is true or auth/permission errors come back, tell the user this is an **optional**
-  step, explain the missing setup, and **continue** adding the source anyway.
+  registration must **also** have the delegated Microsoft Graph permission **`Files.ReadWrite`**
+  consented, and must be an app the user **owns** in the tenant. Microsoft documents
+  `Files.ReadWrite` as the least-privileged delegated permission for `GET /shares`; although this
+  script only issues a `GET`, the consent grants the app read/write access to files the signed-in
+  user can access. Make that permission impact clear before asking the user to opt in. If
+  `needsClientId` is true or auth/permission errors come back, explain the missing setup and
+  **continue** adding the source anyway.
+- Tokens are persisted only when OS-backed encrypted storage is available. Otherwise the check uses
+  an in-memory cache for that run and never writes Graph credentials to plaintext storage.
+- US Government, DoD, and China SharePoint hosts select their matching Graph and Microsoft Entra
+  endpoints automatically. `--cloud <name>` can override inference when necessary.
 - **`AADSTS65002` in an `error`** means the `--client-id` is a Microsoft **first-party/sample** app,
   which cannot obtain Graph tokens. Tell the user to supply **their own** Entra app registration
-  (single-tenant, public client flows enabled, delegated Graph `Files.Read.All` + `Sites.Read.All`
-  consented). An app id that works for `/chat` (preauthorized for the Power Platform API) is **not**
-  automatically valid for Graph. This is a setup issue, not a failure of the source — continue.
+  (single-tenant, public client flows enabled, delegated Graph `Files.ReadWrite` consented). An app
+  id that works for `/chat` (preauthorized for the Power Platform API) is **not** automatically valid
+  for Graph. This is a setup issue, not a failure of the source — continue.
 
 **Interpreting the JSON `status`:**
 
 | `status` | Meaning | What to tell the user |
 |---|---|---|
+| `ok` | Dry-run plan resolved; no request was sent | inspect `needsClientId`, `authority`, and `scopes` before opting in |
 | `accessible` | Link valid; author can read it | ✅ proceed — plus the end-user caveat above |
 | `forbidden` | Access denied — no access **or** the link doesn't resolve (Graph `/shares` returns 403 for both) | ⚠️ re-copy the URL from the browser, confirm you (and end users) have access, then retry — you can still add it, but it returns nothing without access |
 | `notfound` | Link didn't resolve (uncommon — `/shares` usually returns `forbidden` for bad links) | ❌ likely a wrong/renamed URL — re-copy it from the browser address bar |
