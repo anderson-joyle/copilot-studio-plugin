@@ -116,7 +116,7 @@ node "<pluginRoot>/scripts/verify-knowledge-access.bundle.js" --agent-dir "<agen
 | `status` | Meaning | What to tell the user |
 |---|---|---|
 | `accessible` | Link valid; author can read it | ✅ proceed — plus the end-user caveat above |
-| `forbidden` | Item exists; author has no access | ⚠️ you can still add it, but confirm you (and end users) have access, or it will return nothing |
-| `notfound` | Link didn't resolve | ❌ likely a wrong/renamed URL — re-copy it from the browser address bar |
+| `forbidden` | Access denied — no access **or** the link doesn't resolve (Graph `/shares` returns 403 for both) | ⚠️ re-copy the URL from the browser, confirm you (and end users) have access, then retry — you can still add it, but it returns nothing without access |
+| `notfound` | Link didn't resolve (uncommon — `/shares` usually returns `forbidden` for bad links) | ❌ likely a wrong/renamed URL — re-copy it from the browser address bar |
 | `skipped` | Not a SharePoint/OneDrive URL | no check needed |
 | `error` | Setup/auth/network problem | note it's optional; continue adding the source |

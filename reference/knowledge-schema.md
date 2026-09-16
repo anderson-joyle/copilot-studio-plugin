@@ -168,8 +168,9 @@ You can pre-check that a SharePoint/OneDrive link is valid and readable **withou
 file**, using a single Microsoft Graph call (`GET /shares/{id}/driveItem`). The `/add-knowledge`
 command exposes this as an **opt-in** step backed by `scripts/verify-knowledge-access.bundle.js`.
 
-- **What it proves:** the item exists (`200`), the author has no access (`403`), or the link doesn't
-  resolve (`404`).
+- **What it proves:** the author can read the item (`200`), or Graph denied it (`403` — either no
+  access *or* the link doesn't resolve; the `/shares` endpoint returns `403` for both, and rarely a
+  `404`).
 - **⚠️ It checks the author only.** Because knowledge is retrieved at runtime with **each end user's**
   delegated permissions, a positive result confirms *your* access — not that end users can read the
   item. Always pair it with the runtime-permissions note above.

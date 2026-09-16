@@ -14455,7 +14455,7 @@ async function main() {
       url: args.url,
       httpStatus: 403,
       checkedAs: "author",
-      note: "The item exists but the signed-in user does not have access to it. Verify you were granted access in SharePoint/OneDrive, then retry. " + AUTHOR_NOTE
+      note: "Access denied \u2014 Graph could not return this item for the signed-in user. Either you do not have access, or the link does not resolve (a wrong/renamed URL): the Graph /shares endpoint returns 403 for both. Re-copy the URL from the browser address bar and confirm you were granted access in SharePoint/OneDrive, then retry. " + AUTHOR_NOTE
     });
     return;
   }
