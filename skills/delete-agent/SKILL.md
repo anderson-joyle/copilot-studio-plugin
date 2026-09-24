@@ -68,8 +68,7 @@ quotes, so a value placed in double quotes can run another command.
    Otherwise, pass the value as a **single-quoted** literal, never in double quotes, and escape each
    single quote inside it for the shell that runs the command:
    - **bash**: replace each `'` with `'\''`. For example, `Tom's Bot` becomes `'Tom'\''s Bot'`.
-   - **PowerShell**: double each `'`, and also each `‘`, `’`, `‚`, and `‛`, because PowerShell treats
-     all of them as single quotes. For example, `Tom's Bot` becomes `'Tom''s Bot'`.
+- **PowerShell**: double each ASCII `'`. For example, `Tom's Bot` becomes `'Tom''s Bot'`.
 
 The command templates below show each value as `'<value>'`; apply these rules to every one.
 
