@@ -61,13 +61,9 @@ quotes, so a value placed in double quotes can run another command.
    `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`; msagent generates
    them that way. If one does not match, stop and tell the user that the record's ID is not a GUID,
    so the configuration may have been edited by hand. Run nothing.
-2. **Paths, names, and tenant IDs** (`projectDir`, `workspaceDir`, `projectDirectory`, `displayName`, `tenantId`, or a record name the user gives). If a value contains a double quote (`"`), a line break, or any other control character, do not construct the command; stop and report the invalid value.
-   Otherwise, pass the value as a **single-quoted** literal, never in double quotes, and escape each single quote inside it for the shell that runs the command:
-   A double quote can split the value into extra arguments when some shells pass it to msagent.
-   Otherwise, pass the value as a **single-quoted** literal, never in double quotes, and escape each
-   single quote inside it for the shell that runs the command:
+2. **Paths, names, and tenant IDs** (`projectDir`, `workspaceDir`, `projectDirectory`, `displayName`, `tenantId`, or a record name the user gives). If a value contains a double quote (`"`), a line break, or any other control character, do not construct the command; stop and report the invalid value. Otherwise, pass the value as a **single-quoted** literal, never in double quotes, and escape each single quote inside it for the shell that runs the command:
    - **bash**: replace each `'` with `'\''`. For example, `Tom's Bot` becomes `'Tom'\''s Bot'`.
-- **PowerShell**: double each ASCII `'`. For example, `Tom's Bot` becomes `'Tom''s Bot'`.
+   - **PowerShell**: double each ASCII `'`. For example, `Tom's Bot` becomes `'Tom''s Bot'`.
 
 The command templates below show each value as `'<value>'`; apply these rules to every one.
 
