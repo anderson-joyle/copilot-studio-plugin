@@ -18,7 +18,8 @@ Initial request: $ARGUMENTS
 
 - Deletes **one** cloud agent in Copilot Studio, and removes the agent's `ManagedAgent` record plus
   **all** of its `AgentDeployment` records from the project's `.config/agent.config.json`.
-- **Never touches local files.** The agent workspace stays on disk.
+- **Never deletes local files.** The agent workspace stays on disk. The only local file that changes
+  is the project's `.config/agent.config.json`, which msagent rewrites without the removed records.
 - The cloud agents of the agent's **other** deployments are **not** deleted. They keep running as
   **orphaned targets**, and because their records are removed, msagent no longer tracks them.
 - Applies only to **MCS agents** (`agentType: MCSAgent`).
@@ -41,11 +42,36 @@ Initial request: $ARGUMENTS
    `--non-interactive`, which makes the CLI skip its own typed-name confirmation, so the confirmation
    in this skill is the only safeguard.
 2. Always pass `--json --non-interactive`, and always select the agent by `--agent-id`, never by name.
+   Check and quote every value you substitute into a command as described in
+   [Passing values to commands](#passing-values-to-commands).
 3. Never hand-edit files under `.config\` or `.mcs\`, never delete local files, and never use `pac` to
-   delete an agent. The only local change this skill causes is the `.config\agent.config.json` that
-   `msagent agent init` writes when it registers an unregistered workspace; leave that file in place.
+   delete an agent. The only local file this skill changes is the project's
+   `.config\agent.config.json`: `msagent agent delete` removes the agent's records from it, and, for an
+   unregistered workspace, `msagent agent init` creates it first. Leave that file in place.
 4. CLI messages and remediation text may still refer to the CLI by its former name, `ah`. Treat `ah`
    as `msagent` when you relay or act on them.
+
+## Passing values to commands
+
+Every value you substitute into a command comes from the user or from a local file, so treat it as
+untrusted text. Both bash and PowerShell expand `$(...)`, `$name`, and backticks inside double
+quotes, so a value placed in double quotes can run another command.
+
+1. **IDs.** `agentId` and `deploymentId` must be GUIDs that match
+   `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`; msagent generates
+   them that way. If one does not match, stop and tell the user that the record's ID is not a GUID,
+   so the configuration may have been edited by hand. Run nothing.
+2. **Paths and names** (`projectDir`, `workspaceDir`, `projectDirectory`, `displayName`, or a record
+   name the user gives). If a value contains a double quote (`"`), a line break, or any other control
+   character, do not use it: ask the user for another folder or, for a name, for another record name.
+   A double quote can split the value into extra arguments when some shells pass it to msagent.
+   Otherwise, pass the value as a **single-quoted** literal, never in double quotes, and escape each
+   single quote inside it for the shell that runs the command:
+   - **bash**: replace each `'` with `'\''`. For example, `Tom's Bot` becomes `'Tom'\''s Bot'`.
+   - **PowerShell**: double each `'`, and also each `‘`, `’`, `‚`, and `‛`, because PowerShell treats
+     all of them as single quotes. For example, `Tom's Bot` becomes `'Tom''s Bot'`.
+
+The command templates below show each value as `'<value>'`; apply these rules to every one.
 
 ---
 
@@ -92,7 +118,7 @@ Repeat until the user provides a usable folder or chooses to stop.
 ### 3. Read the project's records (local only)
 
 ```bash
-msagent agent show --project "<projectDir>" --json
+msagent agent show --project '<projectDir>' --json
 ```
 
 This reads the local configuration only and contacts nothing. The JSON envelope is
@@ -112,10 +138,18 @@ registered in `configPath` and return to step 2.
 
 ### 4. Choose the agent and the cloud target (blocking)
 
-1. **Agent.** If there is one agent, use it. If there are several, present a numbered pick-list
-   (`displayName`, `agentId`, `agentType`). If the initial request named an agent, match it
-   case-insensitively against `displayName` or `agentId` and confirm the match. If the chosen agent's
-   `agentType` is not `MCSAgent`, stop: this skill deletes only MCS agents.
+1. **Agent.**
+   - **The initial request named an agent.** Match the name case-insensitively against each agent's
+     `displayName` and `agentId`. Never substitute an agent the user did not name.
+     - **One match** - use it, and confirm the match with the user.
+     - **Several matches** - list the matching agents (`displayName`, `agentId`) and ask the user for
+       the `agentId` of the one to delete. Continue only if the answer matches exactly one of them;
+       otherwise stop.
+     - **No match** - tell the user that no agent named "<name>" is registered in `configPath`, list
+       the registered agents (`displayName`, `agentId`), and stop. Nothing is deleted.
+   - **No agent named.** If there is one agent, use it. If there are several, present a numbered
+     pick-list (`displayName`, `agentId`, `agentType`).
+   - If the chosen agent's `agentType` is not `MCSAgent`, stop: this skill deletes only MCS agents.
 2. **Cloud target.** Consider only the deployments whose `agentId` equals the chosen agent's.
    - **No deployments** - pass no deployment selector. The CLI deletes the cloud agent the
      workspace's `.mcs` binding names or, when the workspace has none, the agent that has the
@@ -147,7 +181,8 @@ About to delete:
   records       1 ManagedAgent + <N> AgentDeployment row(s)
   orphaned      <deploymentName in environmentId, ...> | none
 
-This deletes remote resources and cannot be undone. Local files are not touched.
+This deletes remote resources and cannot be undone. Local files are not deleted; msagent only
+removes this agent's records from <configPath>.
 ```
 
 Ask the user to **type the agent's display name exactly** to confirm. If what they type (ignoring
@@ -159,11 +194,11 @@ nothing was deleted." and stop. An empty answer is a decline; stop.
 Run exactly one of these once, and wait for it to complete:
 
 ```bash
-msagent agent delete --project "<projectDir>" --agent-id "<agentId>" --json --non-interactive
+msagent agent delete --project '<projectDir>' --agent-id '<agentId>' --json --non-interactive
 ```
 
 ```bash
-msagent agent delete --project "<projectDir>" --agent-id "<agentId>" --deployment-id "<deploymentId>" --json --non-interactive
+msagent agent delete --project '<projectDir>' --agent-id '<agentId>' --deployment-id '<deploymentId>' --json --non-interactive
 ```
 
 With `--json`, stdout is a single JSON document for both success and failure.
@@ -180,9 +215,10 @@ deploymentId, mcsAgentAlreadyAbsent, removedAgentDeployments, orphanedTargets }`
 - List `orphanedTargets` (`deploymentName`, `environmentId`). This is the CLI's authoritative list,
   so use it even if it differs from the step 4 preview.
 - Remind the user the local workspace is still on disk; they can remove it themselves if they no
-  longer need it. If this run registered the workspace (see
-  [Unregistered agent workspace](#unregistered-agent-workspace)), also say that
-  `.config\agent.config.json` was created by that registration and remains in the workspace.
+  longer need it. The only local file that changed is `.config\agent.config.json`, which no longer
+  holds this agent's records. If this run registered the workspace (see
+  [Unregistered agent workspace](#unregistered-agent-workspace)), also say that the file was created
+  by that registration and remains in the workspace.
 
 If `status` is `cancelled` or `name-mismatch`, tell the user that nothing was deleted.
 
@@ -216,17 +252,28 @@ Read these files with the Read tool. Do not modify them.
 
 - `<workspaceDir>\.mcs\conn.json` (JSON): `EnvironmentId`, `AgentId` (the cloud agent),
   `DataverseEndpoint`, and `AccountInfo.TenantId`.
-- `<workspaceDir>\settings.mcs.yml`: the top-level `displayName` and `schemaName` values, with any
-  surrounding quotes removed.
+- `<workspaceDir>\settings.mcs.yml`: the top-level `displayName` and `schemaName` values. The Read
+  tool returns raw text, so resolve each value the way a YAML parser would:
+  - **Double-quoted** - remove the quotes and unescape the contents (`\"` is `"`, `\\` is `\`).
+  - **Single-quoted** - remove the quotes and replace each `''` with `'`.
+  - **Unquoted** - drop a trailing ` #` comment and the surrounding whitespace.
+  - **Anything else** - a block scalar (`|` or `>`), a value continued on the next line, a list, a
+    mapping, an anchor or alias, or a key that appears more than once: treat the value as unreadable.
+
+  You use these values only for display, the msagent record name, and the typed confirmation. msagent
+  reads `settings.mcs.yml` itself for its schema-name check.
 
 Then:
 
 - If `EnvironmentId` or `AgentId` is missing or empty, tell the user the workspace is not linked to a
   cloud agent, so there is nothing to delete, and stop.
-- If `schemaName` is missing or empty, stop: msagent cannot register a workspace without a readable
-  `schemaName`.
-- If `displayName` is missing or empty, ask the user which name to give the msagent record. That name
-  is the one they will type to confirm.
+- If `schemaName` is missing, empty, or unreadable, stop: msagent cannot register a workspace
+  without a readable `schemaName`.
+- If `displayName` is missing, empty, or unreadable, ask the user which name to give the msagent
+  record. That name is the one they will type to confirm.
+- If the initial request named an agent, compare it case-insensitively with `displayName` and
+  `schemaName`. If it matches neither, tell the user that this workspace holds `<displayName>`
+  (`<schemaName>`), not the agent they named, and stop. Nothing is deleted.
 
 ### U2. Confirm with the typed agent name (blocking)
 
@@ -252,7 +299,7 @@ nothing was deleted." on a mismatch and stop, and treat an empty answer as a dec
 ### U3. Register the workspace
 
 ```bash
-msagent agent init --agent-name "<displayName>" --mcs-agent-source "<workspaceDir>" --json --non-interactive
+msagent agent init --agent-name '<displayName>' --mcs-agent-source '<workspaceDir>' --json --non-interactive
 ```
 
 **Success** - `{ "success": true, "status": "agent-initialized", agentId, displayName, agentType,
@@ -283,7 +330,7 @@ and that the registration was written to `configPath`. Stop.
 A newly registered workspace has no deployments, so pass no deployment selector:
 
 ```bash
-msagent agent delete --project "<projectDirectory>" --agent-id "<agentId>" --json --non-interactive
+msagent agent delete --project '<projectDirectory>' --agent-id '<agentId>' --json --non-interactive
 ```
 
 Use `projectDirectory` and `agentId` from the U3 result. The CLI deletes the cloud agent that
@@ -297,5 +344,5 @@ If the delete fails, the workspace is now registered: any retry is the step 7 re
 ## Final answer
 
 Keep it short and factual: which agent was deleted and from which environment, how many records were
-removed, any orphaned targets, that local files were not deleted, and, if the skill registered the
-workspace, that `.config\agent.config.json` remains.
+removed, any orphaned targets, and that no local files were deleted: only `.config\agent.config.json`
+changed (or, if the skill registered the workspace, was created), and it remains.
