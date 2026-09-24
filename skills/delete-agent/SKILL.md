@@ -57,13 +57,23 @@ Every value you substitute into a command comes from the user or from a local fi
 untrusted text. Both bash and PowerShell expand `$(...)`, `$name`, and backticks inside double
 quotes, so a value placed in double quotes can run another command.
 
-1. **IDs.** `agentId` and `deploymentId` must be GUIDs that match
-   `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`; msagent generates
-   them that way. If one does not match, stop and tell the user that the record's ID is not a GUID,
-   so the configuration may have been edited by hand. Run nothing.
-2. **Paths, names, and tenant IDs** (`projectDir`, `workspaceDir`, `projectDirectory`, `displayName`, `tenantId`, or a record name the user gives). If a value contains a double quote (`"`), a line break, or any other control character, do not construct the command; stop and report the invalid value. Otherwise, pass the value as a **single-quoted** literal, never in double quotes, and escape each single quote inside it for the shell that runs the command:
+1. **IDs.** `agentId`, `deploymentId`, and `tenantId` must be GUIDs that match
+   `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`. msagent generates
+   agent and deployment IDs that way, and a Microsoft Entra tenant ID is always a GUID. If one does
+   not match, stop and tell the user that the value is not a GUID, so the configuration may have
+   been edited by hand. Run nothing.
+2. **Paths and names** (`projectDir`, `workspaceDir`, `projectDirectory`, `displayName`). If a value
+   contains a double quote (`"`), a line break, or any other control character, do not construct the
+   command; stop and report the invalid value. A double quote can split the value into extra
+   arguments when some shells pass it to msagent. Otherwise, pass the value as a **single-quoted**
+   literal, never in double quotes, and escape each single quote inside it for the shell that runs
+   the command:
    - **bash**: replace each `'` with `'\''`. For example, `Tom's Bot` becomes `'Tom'\''s Bot'`.
-   - **PowerShell**: double each ASCII `'`. For example, `Tom's Bot` becomes `'Tom''s Bot'`.
+   - **PowerShell**: double each `'`, and also each `‘`, `’`, `‚`, and `‛`, because PowerShell treats
+     all of them as single quotes and reads a doubled one back as a single character. For example,
+     `Tom's Bot` becomes `'Tom''s Bot'`, and `O’Brien` becomes `'O’’Brien'`, which msagent receives
+     as `O’Brien`. An undoubled `’` ends the literal early, so the command fails or runs the rest of
+     the value as code.
 
 The command templates below show each value as `'<value>'`; apply these rules to every one.
 
@@ -118,9 +128,9 @@ msagent agent show --project '<projectDir>' --json
 This reads the local configuration only and contacts nothing. The JSON envelope is
 `{ success, schemaVersion, projectDirectory, configPath, agents, deployments }`:
 
-- `agents[]` - each has `agentId`, `displayName`, `agentType`, `agentLocation`, `environmentId`
-  (the agent's home environment and its default deletion target), and, when known, `mcsAgentId` and
-  `mcsSchemaName`.
+- `agents[]` - each has `agentId`, `displayName`, `agentType`, `agentLocation`, `tenantId`,
+  `environmentId` (the agent's home environment and its default deletion target), and, when known,
+  `mcsAgentId` and `mcsSchemaName`.
 - `deployments[]` - each has `deploymentId`, `agentId` (its owning agent), `deploymentName`,
   `deploymentType` (the stage), and optionally `environmentId`. A deployment without
   `environmentId` targets its agent's home `environmentId`.
@@ -225,7 +235,7 @@ Always surface `errorMessage` and `remediation`. Then:
 | `records-survived-cloud-delete` | The cloud agent was deleted, but its records could not be removed | Offer to re-run the same delete; the CLI documents that re-running removes the records. |
 | `transport-timeout` | The request timed out and may have completed | Do not retry blindly. Re-run step 3 to see whether the record still exists, tell the user, and offer to re-run only with their consent. |
 | `config-locked` | Another msagent command is writing the configuration | Ask the user to wait for it to finish, then offer to retry. |
-| `environment-not-found`, `tenant-mismatch` | The target environment is not available to the signed-in msagent account | Relay the remediation. If the agent's tenant (for an agent workspace, `AccountInfo.TenantId` in `.mcs\conn.json`) differs from the signed-in `tenantId` reported by `msagent auth status --json`, offer to run `msagent auth login --tenant '<tenantId>'` using the shell escaping and validation in [Passing values to commands](#passing-values-to-commands), then re-run the same command once. |
+| `environment-not-found`, `tenant-mismatch` | The target environment is not available to the signed-in msagent account | Relay the remediation. If the agent's tenant (the agent record's `tenantId` from step 3 or, for an agent workspace, `AccountInfo.TenantId` in `.mcs\conn.json`) differs from the signed-in `tenantId` reported by `msagent auth status --json`, offer to run `msagent auth login --tenant '<tenantId>'` using the validation in [Passing values to commands](#passing-values-to-commands), then re-run the same command once. |
 | `project-not-found`, `config-not-found`, `agent-not-found`, `agent-ambiguous`, `agent-id-conflict`, `deployment-not-found`, `not-an-mcs-agent` | The project or selector does not match the records | Return to step 2 or 4 with the user. |
 | `workspace-schema-unknown`, `workspace-identity-mismatch`, `untrusted-dataverse-origin` | The CLI could not prove that the workspace's `.mcs` binding names this agent in this environment, so it refused to delete rather than risk deleting a different agent | Relay the remediation. Do not edit `.mcs\`, `.config\`, or project files to work around it. |
 | Anything else | - | Relay `errorMessage`, `errorKind`, and `remediation` as-is and stop. |
@@ -247,12 +257,20 @@ Read these files with the Read tool. Do not modify them.
 - `<workspaceDir>\.mcs\conn.json` (JSON): `EnvironmentId`, `AgentId` (the cloud agent),
   `DataverseEndpoint`, and `AccountInfo.TenantId`.
 - `<workspaceDir>\settings.mcs.yml`: the top-level `displayName` and `schemaName` values. The Read
-  tool returns raw text, so resolve each value the way a YAML parser would:
-  - **Double-quoted** - remove the quotes and unescape the contents (`\"` is `"`, `\\` is `\`).
-  - **Single-quoted** - remove the quotes and replace each `''` with `'`.
-  - **Unquoted** - drop a trailing ` #` comment and the surrounding whitespace.
-  - **Anything else** - a block scalar (`|` or `>`), a value continued on the next line, a list, a
-    mapping, an anchor or alias, or a key that appears more than once: treat the value as unreadable.
+  tool returns raw text and no YAML parser is available, so accept only these forms of value and
+  treat anything else as unreadable:
+  - **Double-quoted** (`"..."`) - the only backslash sequences allowed inside are `\"` (a `"`) and
+    `\\` (a `\`). Remove the quotes and unescape those two. Any other backslash sequence, such as
+    `\u0061` or `\n`, makes the value unreadable.
+  - **Single-quoted** (`'...'`) - remove the quotes and replace each `''` with `'`.
+  - **Unquoted** - plain text on the same line as the key. Drop a trailing ` #` comment and the
+    surrounding whitespace. The value is unreadable if what remains is, ignoring case, `true`,
+    `false`, `yes`, `no`, `on`, `off`, `null`, or `~`, if it looks like a number, if it contains
+    `: `, if it starts with `- `, `? `, or `: `, or if it starts with `&`, `*`, `!`, `|`, `>`, `[`,
+    `{`, `@`, `` ` ``, or `%`, because YAML reads those as something other than a plain string.
+
+  After a closing quote, only whitespace or a ` #` comment may follow on the same line. The value is
+  also unreadable if it continues on the next line or if its key appears more than once.
 
   You use these values only for display, the msagent record name, and the typed confirmation. msagent
   reads `settings.mcs.yml` itself for its schema-name check.
@@ -263,7 +281,8 @@ Then:
   cloud agent, so there is nothing to delete, and stop.
 - If `schemaName` is missing, empty, or unreadable, stop: msagent cannot register a workspace
   without a readable `schemaName`.
-- If `displayName` is missing or unreadable, stop: the workspace does not provide the exact display name required for the deletion confirmation.
+- If `displayName` is missing, empty, or unreadable, stop: the workspace does not provide the exact
+  display name that the deletion confirmation requires.
 - If the initial request named an agent, compare it case-insensitively with `displayName` and
   `schemaName`. If it matches neither, tell the user that this workspace holds `<displayName>`
   (`<schemaName>`), not the agent they named, and stop. Nothing is deleted.
@@ -298,14 +317,15 @@ msagent agent init --agent-name '<displayName>' --mcs-agent-source '<workspaceDi
 **Success** - `{ "success": true, "status": "agent-initialized", agentId, displayName, agentType,
 tenantId, environmentId, connected, projectDirectory, configPath }`.
 
-Before deleting, verify both of these:
+Before deleting, verify all of these:
 
+- `agentType` is `MCSAgent`, because this skill deletes only MCS agents;
 - `connected` is `true`, which means msagent read the workspace's `.mcs` binding; and
 - `environmentId` equals `EnvironmentId` from `.mcs\conn.json` (case-insensitive).
 
-If either check fails, **do not delete**. Tell the user msagent did not register the workspace
-against the cloud agent that `.mcs\conn.json` names, so a delete could target a different agent,
-and that the registration was written to `configPath`. Stop.
+If any check fails, **do not delete**. Tell the user which check failed and that msagent did not
+register the workspace as the MCS agent that `.mcs\conn.json` names, so a delete could target a
+different agent, and that the registration was written to `configPath`. Stop.
 
 **Failure** - relay `errorMessage` and `remediation`. Then:
 
