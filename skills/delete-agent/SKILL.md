@@ -1,7 +1,7 @@
 ---
 name: delete-agent
-description: Delete a Copilot Studio agent's cloud resources and its msagent project records with `msagent agent delete`, after an explicit typed-name confirmation. Local files are never touched. Use when the user asks to delete, remove, or destroy a Copilot Studio agent in the cloud.
-argument-hint: Optional project folder path and/or agent name
+description: Delete a Copilot Studio agent's cloud resources and its msagent project records with `msagent agent delete`, after an explicit typed-name confirmation. Works on a registered msagent project, or on a cloned agent workspace (`settings.mcs.yml` + `.mcs/conn.json`) that it first registers with `msagent agent init`. Local files are never deleted. Use when the user asks to delete, remove, or destroy a Copilot Studio agent in the cloud.
+argument-hint: Optional project or agent workspace folder path and/or agent name
 allowed-tools: Bash(msagent *), Read, Glob, Grep
 ---
 
@@ -22,18 +22,28 @@ Initial request: $ARGUMENTS
 - The cloud agents of the agent's **other** deployments are **not** deleted. They keep running as
   **orphaned targets**, and because their records are removed, msagent no longer tracks them.
 - Applies only to **MCS agents** (`agentType: MCSAgent`).
-- Works only on a project **registered** with the msagent CLI, which is a folder that contains
-  `.config/agent.config.json` (created by `msagent agent create` or `msagent agent init`). A folder
-  produced only by `pac copilot clone` is not registered.
+- `msagent agent delete` works only on a project **registered** with the msagent CLI, which is a
+  folder that contains `.config/agent.config.json` (created by `msagent agent create` or
+  `msagent agent init`). This skill accepts two kinds of folder:
+  - A **registered project** - a folder that contains `.config/agent.config.json`.
+  - An **unregistered agent workspace** - a folder that contains both `settings.mcs.yml` and
+    `.mcs/conn.json`, such as a workspace cloned with the Copilot Studio VS Code extension or
+    `pac copilot clone`. `.mcs/conn.json` names the cloud agent (`AgentId`) and its environment
+    (`EnvironmentId`), and `settings.mcs.yml` supplies its `schemaName` and `displayName`. The skill
+    first registers the workspace with `msagent agent init`, which writes
+    `.config\agent.config.json` into the workspace and creates nothing in Copilot Studio, and then
+    deletes it. That file stays in place after the delete.
 
 ## Rules
 
-1. **Never run `msagent agent delete` before the user has typed the agent's exact display name in
-   step 5.** This skill always passes `--non-interactive`, which makes the CLI skip its own typed-name
-   confirmation, so the confirmation in this skill is the only safeguard.
+1. **Never run `msagent agent delete` or `msagent agent init` before the user has typed the agent's
+   exact display name** (step 5, or step U2 for an unregistered workspace). This skill always passes
+   `--non-interactive`, which makes the CLI skip its own typed-name confirmation, so the confirmation
+   in this skill is the only safeguard.
 2. Always pass `--json --non-interactive`, and always select the agent by `--agent-id`, never by name.
 3. Never hand-edit files under `.config\` or `.mcs\`, never delete local files, and never use `pac` to
-   delete an agent.
+   delete an agent. The only local change this skill causes is the `.config\agent.config.json` that
+   `msagent agent init` writes when it registers an unregistered workspace; leave that file in place.
 4. CLI messages and remediation text may still refer to the CLI by its former name, `ah`. Treat `ah`
    as `msagent` when you relay or act on them.
 
@@ -50,17 +60,34 @@ msagent --version
 If the command is not found, tell the user: "The msagent CLI is required but was not found. Install
 it, then retry." Stop.
 
-### 2. Locate the registered project (blocking)
+### 2. Locate the project or agent workspace (blocking)
 
-The **project directory** is the folder that contains `.config\agent.config.json` (the parent of
-`.config`).
+A **registered project directory** is a folder that contains `.config\agent.config.json` (the parent
+of `.config`). An **unregistered agent workspace** is a folder that contains both `settings.mcs.yml`
+and `.mcs\conn.json` but no `.config\agent.config.json`. msagent places an agent workspace either at
+the project root or in a direct subfolder of it.
 
-1. If the initial request names a folder, use it.
-2. Otherwise auto-discover candidates with `Glob: **/.config/agent.config.json`.
-3. If several are found, present a numbered pick-list. Never silently use the first match.
-4. If none is found, or the chosen folder has no `.config\agent.config.json`, tell the user that the
-   folder is not a registered msagent project and ask them for the folder of a registered project.
-   Repeat until they provide one or choose to stop.
+1. **The initial request names a folder.**
+   - If the folder, or its parent, contains `.config\agent.config.json`, the folder that contains
+     `.config` is the registered project directory. Continue with step 3.
+   - Otherwise, if the folder contains both `settings.mcs.yml` and `.mcs\conn.json`, it is an
+     unregistered agent workspace. Continue with
+     [Unregistered agent workspace](#unregistered-agent-workspace).
+   - Otherwise, if it contains `settings.mcs.yml` but no `.mcs\conn.json`, tell the user the folder is
+     not linked to a cloud agent, so there is nothing to delete, and ask for another folder.
+   - Otherwise, tell the user the folder is neither a registered msagent project nor an agent
+     workspace, and ask for another folder.
+2. **No folder named.** Auto-discover registered projects with
+   `Glob: **/.config/agent.config.json`. If any are found, present a numbered pick-list (never
+   silently use the first match), then continue with step 3 using the chosen project directory.
+3. **No registered project found.** Auto-discover agent workspaces with `Glob: **/.mcs/conn.json`,
+   and keep only the matches whose workspace folder (the parent of `.mcs`) also contains
+   `settings.mcs.yml`. If any are found, present a numbered pick-list, then continue with
+   [Unregistered agent workspace](#unregistered-agent-workspace) using the chosen folder.
+4. **Nothing found.** Tell the user that no registered msagent project (`.config\agent.config.json`)
+   or agent workspace (`settings.mcs.yml` + `.mcs\conn.json`) was found, and ask for a folder.
+
+Repeat until the user provides a usable folder or chooses to stop.
 
 ### 3. Read the project's records (local only)
 
@@ -153,7 +180,9 @@ deploymentId, mcsAgentAlreadyAbsent, removedAgentDeployments, orphanedTargets }`
 - List `orphanedTargets` (`deploymentName`, `environmentId`). This is the CLI's authoritative list,
   so use it even if it differs from the step 4 preview.
 - Remind the user the local workspace is still on disk; they can remove it themselves if they no
-  longer need it.
+  longer need it. If this run registered the workspace (see
+  [Unregistered agent workspace](#unregistered-agent-workspace)), also say that
+  `.config\agent.config.json` was created by that registration and remains in the workspace.
 
 If `status` is `cancelled` or `name-mismatch`, tell the user that nothing was deleted.
 
@@ -166,13 +195,107 @@ Always surface `errorMessage` and `remediation`. Then:
 | `records-survived-cloud-delete` | The cloud agent was deleted, but its records could not be removed | Offer to re-run the same delete; the CLI documents that re-running removes the records. |
 | `transport-timeout` | The request timed out and may have completed | Do not retry blindly. Re-run step 3 to see whether the record still exists, tell the user, and offer to re-run only with their consent. |
 | `config-locked` | Another msagent command is writing the configuration | Ask the user to wait for it to finish, then offer to retry. |
+| `environment-not-found`, `tenant-mismatch` | The target environment is not available to the signed-in msagent account | Relay the remediation. If the agent's tenant (for an agent workspace, `AccountInfo.TenantId` in `.mcs\conn.json`) differs from the signed-in `tenantId` reported by `msagent auth status --json`, offer to run `msagent auth login --tenant <tenantId>`, then re-run the same command once. |
 | `project-not-found`, `config-not-found`, `agent-not-found`, `agent-ambiguous`, `agent-id-conflict`, `deployment-not-found`, `not-an-mcs-agent` | The project or selector does not match the records | Return to step 2 or 4 with the user. |
-| `workspace-schema-unknown`, `workspace-identity-mismatch` | The CLI could not prove that the workspace's `.mcs` binding names this agent, so it refused to delete rather than risk deleting a different agent | Relay the remediation. Do not edit `.mcs\`, `.config\`, or project files to work around it. |
+| `workspace-schema-unknown`, `workspace-identity-mismatch`, `untrusted-dataverse-origin` | The CLI could not prove that the workspace's `.mcs` binding names this agent in this environment, so it refused to delete rather than risk deleting a different agent | Relay the remediation. Do not edit `.mcs\`, `.config\`, or project files to work around it. |
 | Anything else | - | Relay `errorMessage`, `errorKind`, and `remediation` as-is and stop. |
 
 If `partialResult` is present, summarize it for the user.
 
+---
+
+## Unregistered agent workspace
+
+Use this path when step 2 chose a folder that contains `settings.mcs.yml` and `.mcs\conn.json` but
+no registered project. `msagent agent delete` cannot act on it until the workspace is registered, so
+you confirm first, then register it with `msagent agent init`, then delete it.
+
+### U1. Read the workspace identity (local only)
+
+Read these files with the Read tool. Do not modify them.
+
+- `<workspaceDir>\.mcs\conn.json` (JSON): `EnvironmentId`, `AgentId` (the cloud agent),
+  `DataverseEndpoint`, and `AccountInfo.TenantId`.
+- `<workspaceDir>\settings.mcs.yml`: the top-level `displayName` and `schemaName` values, with any
+  surrounding quotes removed.
+
+Then:
+
+- If `EnvironmentId` or `AgentId` is missing or empty, tell the user the workspace is not linked to a
+  cloud agent, so there is nothing to delete, and stop.
+- If `schemaName` is missing or empty, stop: msagent cannot register a workspace without a readable
+  `schemaName`.
+- If `displayName` is missing or empty, ask the user which name to give the msagent record. That name
+  is the one they will type to confirm.
+
+### U2. Confirm with the typed agent name (blocking)
+
+Show a summary like this:
+
+```text
+About to delete:
+  agent         <displayName> (schema name <schemaName>)
+  cloud agent   <AgentId> in environment <EnvironmentId>
+  Dataverse     <DataverseEndpoint>
+  workspace     <workspaceDir>
+  registration  This workspace is not registered with msagent. It will first be registered with
+                `msagent agent init`, which writes <workspaceDir>\.config\agent.config.json.
+
+This deletes remote resources and cannot be undone. Local files are not deleted, and the
+.config\agent.config.json created by the registration stays in the workspace.
+```
+
+Ask the user to **type the agent's display name exactly** to confirm, with the same rules as step 5:
+compare the trimmed answer with `displayName` exactly, reply "That does not match the agent name, so
+nothing was deleted." on a mismatch and stop, and treat an empty answer as a decline.
+
+### U3. Register the workspace
+
+```bash
+msagent agent init --agent-name "<displayName>" --mcs-agent-source "<workspaceDir>" --json --non-interactive
+```
+
+**Success** - `{ "success": true, "status": "agent-initialized", agentId, displayName, agentType,
+tenantId, environmentId, connected, projectDirectory, configPath }`.
+
+Before deleting, verify both of these:
+
+- `connected` is `true`, which means msagent read the workspace's `.mcs` binding; and
+- `environmentId` equals `EnvironmentId` from `.mcs\conn.json` (case-insensitive).
+
+If either check fails, **do not delete**. Tell the user msagent did not register the workspace
+against the cloud agent that `.mcs\conn.json` names, so a delete could target a different agent,
+and that the registration was written to `configPath`. Stop.
+
+**Failure** - relay `errorMessage` and `remediation`. Then:
+
+| Condition | What to do |
+|---|---|
+| `exitCode` is `3` | Offer to run `msagent auth login`. On consent, run it, wait for the user to finish, then re-run the same `init` command once. |
+| `environment-not-found`, `tenant-mismatch` | Handle as in the step 7 table, then re-run the same `init` command once. |
+| `already-registered` | The workspace is already registered. Continue with step 3, using `<workspaceDir>` as the project directory. |
+| `workspace-schema-unreadable` | `settings.mcs.yml` has no `schemaName` msagent can read. Stop. |
+| `project-not-found` | msagent does not see an agent workspace in the folder. Return to step 2. |
+| Anything else | Relay `errorMessage`, `errorKind`, and `remediation` as-is and stop. |
+
+### U4. Run the delete
+
+A newly registered workspace has no deployments, so pass no deployment selector:
+
+```bash
+msagent agent delete --project "<projectDirectory>" --agent-id "<agentId>" --json --non-interactive
+```
+
+Use `projectDirectory` and `agentId` from the U3 result. The CLI deletes the cloud agent that
+`.mcs\conn.json` names, after verifying that the workspace's Dataverse organization matches the
+environment and that the cloud agent's schema name matches `schemaName` in `settings.mcs.yml`. Then
+report the result as in step 7.
+
+If the delete fails, the workspace is now registered: any retry is the step 7 recovery for the same
+`msagent agent delete` command.
+
 ## Final answer
 
 Keep it short and factual: which agent was deleted and from which environment, how many records were
-removed, any orphaned targets, and that local files were not touched.
+removed, any orphaned targets, that local files were not deleted, and, if the skill registered the
+workspace, that `.config\agent.config.json` remains.
