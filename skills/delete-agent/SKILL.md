@@ -268,8 +268,7 @@ Then:
   cloud agent, so there is nothing to delete, and stop.
 - If `schemaName` is missing, empty, or unreadable, stop: msagent cannot register a workspace
   without a readable `schemaName`.
-- If `displayName` is missing, empty, or unreadable, ask the user which name to give the msagent
-  record. That name is the one they will type to confirm.
+- If `displayName` is missing or unreadable, stop: the workspace does not provide the exact display name required for the deletion confirmation.
 - If the initial request named an agent, compare it case-insensitively with `displayName` and
   `schemaName`. If it matches neither, tell the user that this workspace holds `<displayName>`
   (`<schemaName>`), not the agent they named, and stop. Nothing is deleted.
