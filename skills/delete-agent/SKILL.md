@@ -105,8 +105,15 @@ the project root or in a direct subfolder of it.
      [Unregistered agent workspace](#unregistered-agent-workspace).
    - Otherwise, if it contains `settings.mcs.yml` but no `.mcs\conn.json`, tell the user the folder is
      not linked to a cloud agent, so there is nothing to delete, and ask for another folder.
-   - Otherwise, tell the user the folder is neither a registered msagent project nor an agent
-     workspace, and ask for another folder.
+   - Otherwise, check the folder's direct subfolders (one level only), such as the folder that
+     `pac copilot clone` creates under its output directory. A subfolder that contains
+     `.config\agent.config.json` is a registered project directory. A subfolder that contains both
+     `settings.mcs.yml` and `.mcs\conn.json` but no `.config\agent.config.json` is an unregistered
+     agent workspace. If any are found, present a numbered pick-list (folder, and whether it is
+     registered), even for a single match. Then continue with step 3 or
+     [Unregistered agent workspace](#unregistered-agent-workspace) for the chosen folder.
+   - Otherwise, tell the user that neither the folder nor its direct subfolders are a registered
+     msagent project or an agent workspace, and ask for another folder.
 2. **No folder named.** Auto-discover registered projects with
    `Glob: **/.config/agent.config.json`. If any are found, present a numbered pick-list (never
    silently use the first match), then continue with step 3 using the chosen project directory.
@@ -333,10 +340,21 @@ different agent, and that the registration was written to `configPath`. Stop.
 |---|---|
 | `exitCode` is `3` | Offer to run `msagent auth login`. On consent, run it, wait for the user to finish, then re-run the same `init` command once. |
 | `environment-not-found`, `tenant-mismatch` | Handle as in the step 7 table, then re-run the same `init` command once. |
-| `already-registered` | The workspace is already registered. Continue with step 3, using `<workspaceDir>` as the project directory. |
+| `already-registered` | msagent already has a registration for this workspace. The U2 confirmation does not cover it; follow **Already registered** below. |
 | `workspace-schema-unreadable` | `settings.mcs.yml` has no `schemaName` msagent can read. Stop. |
 | `project-not-found` | msagent does not see an agent workspace in the folder. Return to step 2. |
 | Anything else | Relay `errorMessage`, `errorKind`, and `remediation` as-is and stop. |
+
+**Already registered** - the U2 confirmation covers only a new registration, so it does not carry
+over. Run the step 3 command with `<workspaceDir>` as the project directory, and handle its failures
+as step 3 does. Keep only the records whose `agentLocation` is `.` (the workspace itself) and whose
+`mcsAgentId` equals `AgentId` from `.mcs\conn.json` (case-insensitive).
+
+- **Exactly one record** - use it as the chosen agent. If its `agentType` is not `MCSAgent`, stop.
+  Otherwise, continue with the cloud target and orphan checks (step 4, items 2 and 3), then ask
+  again for the typed display name in step 5 before running step 6.
+- **None or several** - tell the user that the existing registration in `configPath` does not
+  identify the cloud agent that `.mcs\conn.json` names, so nothing was deleted, and stop.
 
 ### U4. Run the delete
 
